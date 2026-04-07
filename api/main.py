@@ -1,33 +1,31 @@
-from flask import Flask, render_template, request, redirect, session, jsonify
+from flask import Flask, render_template, request, redirect, session, url_for
 from supabase import create_client, Client
 
 app = Flask(_name_, template_folder='../templates')
-app.secret_key = "qihku_bi_mat_123" # Khóa để giữ đăng nhập
+app.secret_key = "qihku_bi_mat_123" 
 
-# Thông tin kết nối
+# Kết nối Supabase
 SUPABASE_URL = "https://awagntcuogwlqoztiwsu.supabase.co"
 SUPABASE_KEY = "sbp_publishable_lUdwPeFeo-h6GHCJ46orUg_T8c-hJA6"
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 @app.route('/')
 def index():
-    user = session.get('user')
-    balance = 0
-    if user:
-        # Lấy số dư mới nhất của khách
-        res = supabase.table('users').select("balance").eq("username", user).single().execute()
-        if res.data: balance = res.data['balance']
-    return render_template('index.html', user=user, balance=balance)
+    user_info = None
+    if 'user' in session:
+        # Lấy thông tin user và số dư
+        res = supabase.table('users').select("*").eq("username", session['user']).single().execute()
+        if res.data: user_info = res.data
+    return render_template('index.html', user=user_info)
 
-# --- ĐĂNG KÝ / ĐĂNG NHẬP ---
 @app.route('/register', methods=['POST'])
 def register():
     user = request.form.get('username')
     pwd = request.form.get('password')
     try:
         supabase.table('users').insert({"username": user, "password": pwd, "balance": 0}).execute()
-        return "Đăng ký xong! Quay lại đăng nhập nhé."
-    except: return "Tên này có người dùng rồi bro!"
+        return "<h3>Đăng ký xong!</h3><a href='/'>Quay lại đăng nhập</a>"
+    except: return "<h3>Tên này đã có người dùng!</h3><a href='/'>Thử lại</a>"
 
 @app.route('/login', methods=['POST'])
 def login():
@@ -37,42 +35,39 @@ def login():
     if res.data:
         session['user'] = user
         return redirect('/')
-    return "Sai tài khoản hoặc mật khẩu!"
+    return "<h3>Sai tài khoản hoặc mật khẩu!</h3><a href='/'>Quay lại</a>"
 
-# --- RÚT ROBUX & TRỪ TIỀN ---
 @app.route('/rut-robux', methods=['POST'])
 def rut_robux():
-    if 'user' not in session: return "Phải đăng nhập mới rút được!"
+    if 'user' not in session: return redirect('/')
     
-    user = session['user']
     amount = int(request.form.get('amount'))
     link = request.form.get('gamepass')
-    price = amount * 100 # Ví dụ: 100đ/1 Robux (Bro tự chỉnh giá)
+    price = amount * 100 # Ví dụ 100đ/1 Robux. Bạn có thể tự chỉnh giá này.
 
-    # 1. Check tiền
-    res = supabase.table('users').select("balance").eq("username", user).single().execute()
-    if res.data['balance'] < price: return "Không đủ tiền nạp thêm đi bro!"
+    # Kiểm tra số dư khách
+    user_res = supabase.table('users').select("balance").eq("username", session['user']).single().execute()
+    if user_res.data and user_res.data['balance'] >= price:
+        # 1. Trừ tiền khách
+        new_balance = user_res.data['balance'] - price
+        supabase.table('users').update({"balance": new_balance}).eq("username", session['user']).execute()
+        # 2. Tạo đơn vào bảng order
+        supabase.table('order').insert({"username": session['user'], "amount": amount, "gamepass_link": link}).execute()
+        return f"<h3>Thành công! Đã trừ {price}đ.</h3><a href='/'>Quay lại</a>"
+    return "<h3>Không đủ tiền nạp thêm đi bro!</h3><a href='/'>Quay lại</a>"
 
-    # 2. Trừ tiền và Tạo đơn
-    new_balance = res.data['balance'] - price
-    supabase.table('users').update({"balance": new_balance}).eq("username", user).execute()
-    supabase.table('qihku').insert({"username": user, "amount": amount, "gamepass_link": link}).execute()
-    
-    return f"Đã trừ {price}đ. Chờ duyệt đơn nhé!"
-
-# --- NẠP TIỀN TỰ ĐỘNG (WEBHOOK) ---
+# --- WEBHOOK NẠP THẺ (Gachthefast) ---
 @app.route('/callback-card', methods=['POST'])
 def card_callback():
-    # Gachthefast gửi dữ liệu qua đây
-    data = request.form 
+    data = request.form # Nhận từ Gachthefast
     status = data.get('status')
-    amount = int(data.get('value')) # Số tiền thẻ
-    username = data.get('content') # Nội dung là tên tài khoản khách ghi
+    amount = int(data.get('value')) # Mệnh giá thẻ
+    username = data.get('content') # Nội dung là tên tài khoản khách ghi khi nạp
     
     if status == '1': # Thẻ đúng
-        res = supabase.table('users').select("balance").eq("username", username).single().execute()
-        if res.data:
-            new_bal = res.data['balance'] + amount
+        user_res = supabase.table('users').select("balance").eq("username", username).single().execute()
+        if user_res.data:
+            new_bal = user_res.data['balance'] + amount
             supabase.table('users').update({"balance": new_bal}).eq("username", username).execute()
     return "OK"
 
@@ -80,4 +75,3 @@ def card_callback():
 def logout():
     session.pop('user', None)
     return redirect('/')
-
